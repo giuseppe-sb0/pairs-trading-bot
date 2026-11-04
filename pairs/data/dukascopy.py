@@ -82,16 +82,24 @@ def download_range(symbol: str, start: date, end: date, cache_dir: Path,
     sess = requests.Session()
     sess.headers["User-Agent"] = "asiamr-backtester/1.0"
 
+    def download(d: date, f: Path) -> bytes:
+        url = URL.format(sym=symbol, y=d.year, m=d.month - 1, d=d.day, side=side)
+        content = _fetch(sess, url)
+        if d < date.today() - timedelta(days=1):   # non mettere in cache il giorno corrente
+            tmp = f.with_name(f.name + ".part")    # scrittura atomica: un'interruzione non lascia file a meta'
+            tmp.write_bytes(content)
+            tmp.replace(f)
+        return content
+
     def job(d: date) -> pd.DataFrame:
         f = cache_dir / f"{d.isoformat()}.bi5"
         if f.exists():
-            content = f.read_bytes()
-        else:
-            url = URL.format(sym=symbol, y=d.year, m=d.month - 1, d=d.day, side=side)
-            content = _fetch(sess, url)
-            if d < date.today() - timedelta(days=1):   # non mettere in cache il giorno corrente
-                f.write_bytes(content)
-        return parse_bi5(content, d, symbol)
+            try:
+                return parse_bi5(f.read_bytes(), d, symbol)
+            except (lzma.LZMAError, EOFError, ValueError):
+                log.warning("file in cache danneggiato, lo riscarico: %s", f)
+                f.unlink(missing_ok=True)
+        return parse_bi5(download(d, f), d, symbol)
 
     frames, failed = [], []
     with ThreadPoolExecutor(max_workers=workers) as ex:
