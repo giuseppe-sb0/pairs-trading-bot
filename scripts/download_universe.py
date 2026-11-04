@@ -35,10 +35,16 @@ def main():
     cfg = load_config()
     end = date.fromisoformat(a.end) if a.end else date.today()
     start = (pd.Timestamp(end) - pd.DateOffset(months=a.months)).date()
-    problems = []
+    problems, incomplete = [], {}
     for sym in a.symbols or cfg["universe"]:
         logging.info("=== %s %s -> %s ===", sym, start, end)
-        m1 = clean_m1(download_range(sym, start, end, a.cache_dir, workers=a.workers))
+        raw = download_range(sym, start, end, a.cache_dir, workers=a.workers)
+        failed = raw.attrs.get("failed_days", [])
+        if failed:
+            incomplete[sym] = len(failed)
+            logging.error("%s: %d giorni non scaricati, file H1 NON salvato (dati incompleti)", sym, len(failed))
+            continue
+        m1 = clean_m1(raw)
         h1 = resample(m1, cfg["timeframe"])
         save_bars(h1, ROOT / "data" / "h1" / f"{sym}.csv.gz")
         med = float(h1["close"].median())
@@ -47,6 +53,10 @@ def main():
         if flag != "OK":
             problems.append(sym)
         logging.info("%s: %d barre H1, prezzo mediano %.5f [%s]", sym, len(h1), med, flag)
+    if incomplete:
+        raise SystemExit(f"Download incompleto per {incomplete} (giorni mancanti). Il server Dukascopy era "
+                         "sovraccarico: aspetta qualche minuto e rilancia lo STESSO comando, magari con "
+                         "--workers 2. I giorni gia' scaricati sono in cache e non vengono riscaricati.")
     if problems:
         raise SystemExit(f"Prezzi fuori scala per {problems}: non usare questi dati")
     logging.info("Fatto. Ora: python scripts/diagnose_pairs.py")

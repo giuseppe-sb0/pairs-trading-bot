@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import lzma
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
@@ -28,7 +29,12 @@ def _divisor(symbol: str) -> float:
     return 1e3 if "JPY" in symbol.upper() else 1e5
 
 
-def _fetch(session: requests.Session, url: str, retries: int = 5) -> bytes:
+class DownloadError(RuntimeError):
+    pass
+
+
+def _fetch(session: requests.Session, url: str, retries: int = 8) -> bytes:
+    """GET con retry: attese crescenti (fino a 60 s) con jitter; rispetta Retry-After su 429/503."""
     for attempt in range(retries):
         try:
             r = session.get(url, timeout=30)
@@ -37,10 +43,14 @@ def _fetch(session: requests.Session, url: str, retries: int = 5) -> bytes:
             r.raise_for_status()
             return r.content
         except requests.RequestException as exc:
-            wait = 2 ** attempt
-            log.warning("errore %s (%s), retry tra %ss", url, exc, wait)
-            time.sleep(wait)
-    raise RuntimeError(f"Download fallito: {url}")
+            wait = min(60.0, 2.0 ** attempt) + random.uniform(0, 1.5)
+            resp = getattr(exc, "response", None)
+            if resp is not None and resp.headers.get("Retry-After", "").isdigit():
+                wait = max(wait, float(resp.headers["Retry-After"]))
+            if attempt < retries - 1:
+                log.warning("errore %s (%s), retry %d/%d tra %.0fs", url, exc, attempt + 1, retries - 1, wait)
+                time.sleep(wait)
+    raise DownloadError(f"Download fallito dopo {retries} tentativi: {url}")
 
 
 def parse_bi5(content: bytes, day: date, symbol: str) -> pd.DataFrame:
@@ -83,15 +93,21 @@ def download_range(symbol: str, start: date, end: date, cache_dir: Path,
                 f.write_bytes(content)
         return parse_bi5(content, d, symbol)
 
-    frames = []
+    frames, failed = [], []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(job, d): d for d in days}
         for n, fut in enumerate(as_completed(futs), 1):
-            frames.append(fut.result())
+            try:
+                frames.append(fut.result())
+            except DownloadError as exc:      # un giorno non scaricabile non ferma tutto il resto
+                failed.append(futs[fut])
+                log.error("%s", exc)
             if n % 25 == 0 or n == len(days):
-                log.info("scaricati %d/%d giorni", n, len(days))
+                log.info("%s: elaborati %d/%d giorni (%d falliti)", symbol, n, len(days), len(failed))
     frames = [f for f in frames if not f.empty]
     if not frames:
         raise RuntimeError("Nessun dato scaricato")
     df = pd.concat(frames).sort_index()
-    return df[~df.index.duplicated(keep="last")]
+    df = df[~df.index.duplicated(keep="last")]
+    df.attrs["failed_days"] = sorted(failed)    # da riscaricare: rilanciare lo stesso comando
+    return df
