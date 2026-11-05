@@ -9,7 +9,7 @@ import _bootstrap  # noqa: F401
 
 import argparse
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -26,14 +26,16 @@ DEFAULT_RANGE = (0.4, 2.5)
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--months", type=int, default=36)
-    ap.add_argument("--end", help="esclusa (default: oggi)")
+    ap.add_argument("--end", help="esclusa (default: ieri, cioe' dati fino all'altro ieri)")
     ap.add_argument("--symbols", nargs="*", help="default: universo in config.yaml")
     ap.add_argument("--cache-dir", default=str(ROOT / "data" / "raw" / "dukascopy"))
     ap.add_argument("--workers", type=int, default=4)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
-    end = date.fromisoformat(a.end) if a.end else date.today()
+    # default: fino a ieri escluso. Gli ultimi giorni Dukascopy li pubblica in ritardo (errori 503)
+    # e per una diagnosi su anni di dati non servono.
+    end = date.fromisoformat(a.end) if a.end else date.today() - timedelta(days=1)
     start = (pd.Timestamp(end) - pd.DateOffset(months=a.months)).date()
     problems, incomplete = [], {}
     for sym in a.symbols or cfg["universe"]:
